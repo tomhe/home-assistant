@@ -1,0 +1,264 @@
+blueprint:
+  name: Tesla 3-fas lastbalansering (Tibber Pulse, A + effekttak)
+  description: |
+    Dynamisk lastbalansering för Tesla via Home Assistant.
+    Justerar Teslans laddström upp/ned baserat på fasströmmar (A) från t.ex. Tibber Pulse
+    och ett effekttak (kW) för alla faser tillsammans.
+
+    Skydd:
+    - Max A per fas
+    - Max kW totalt (alla faser)
+  domain: automation
+
+  input:
+    phase1_current_entity:
+      name: Fas 1 ström (A)
+      description: Sensor för ström på fas 1 (t.ex. från Tibber Pulse).
+      selector:
+        entity:
+          filter:
+            - domain: sensor
+
+    phase2_current_entity:
+      name: Fas 2 ström (A)
+      description: Sensor för ström på fas 2.
+      selector:
+        entity:
+          filter:
+            - domain: sensor
+
+    phase3_current_entity:
+      name: Fas 3 ström (A)
+      description: Sensor för ström på fas 3.
+      selector:
+        entity:
+          filter:
+            - domain: sensor
+
+    total_power_entity:
+      name: Total effekt (alla faser)
+      description: Sensor för husets totala effekt (W eller kW).
+      selector:
+        entity:
+          filter:
+            - domain: sensor
+
+    power_limit_entity:
+      name: Effekttak (kW) – styrbar entitet
+      description: Number/input_number som anger max tillåten effekt (kW), t.ex. 9 kW.
+      selector:
+        entity:
+          filter:
+            - domain: number
+            - domain: input_number
+
+    power_limit_hysteresis_kw:
+      name: Hysteresis för effekttak (kW)
+      description: Hur mycket under effekttaket du vill vara innan laddström får öka igen.
+      default: 0.5
+      selector:
+        number:
+          min: 0
+          max: 5
+          step: 0.1
+          mode: box
+
+    per_phase_upper_amps:
+      name: Övre gräns per fas (A)
+      description: Om någon fas överstiger detta värde minskas laddströmmen.
+      default: 15.5
+      selector:
+        number:
+          min: 5
+          max: 32
+          step: 0.1
+          mode: box
+
+    per_phase_lower_amps:
+      name: Nedre gräns per fas (A)
+      description: Om alla faser ligger under detta värde kan laddströmmen ökas.
+      default: 13.0
+      selector:
+        number:
+          min: 1
+          max: 32
+          step: 0.1
+          mode: box
+
+    polling_interval_seconds:
+      name: Pollintervall (sekunder)
+      description: Hur ofta laddströmmen ska utvärderas/justeras.
+      default: "/5"
+      selector:
+        select:
+          options:
+            - label: 5 sek
+              value: "/5"
+            - label: 10 sek
+              value: "/10"
+            - label: 15 sek
+              value: "/15"
+            - label: 30 sek
+              value: "/30"
+
+    tesla_charging_state_entity:
+      name: Tesla laddningsstatus (binary_sensor)
+      description: Binär sensor som är "on" när bilen laddar.
+      selector:
+        entity:
+          filter:
+            - domain: binary_sensor
+
+    tesla_charging_amps_number_entity:
+      name: Tesla laddström (number)
+      description: Number-entitet för Teslans laddström (A), t.ex. number.tesla_*_charging_amps.
+      selector:
+        entity:
+          filter:
+            - domain: number
+
+    tesla_charging_amps_upper_value:
+      name: Max laddström (A)
+      description: Max tillåten laddström som automations får sätta.
+      default: 16
+      selector:
+        number:
+          min: 5
+          max: 32
+          step: 1
+          mode: slider
+
+    tesla_charging_amps_lower_value:
+      name: Min laddström (A)
+      description: Minsta laddström som används vid nedreglering.
+      default: 5
+      selector:
+        number:
+          min: 0
+          max: 16
+          step: 1
+          mode: slider
+
+    tesla_device_tracker_entity:
+      name: Tesla plats (device_tracker)
+      description: Device_tracker för bilen, t.ex. device_tracker.tesla_location.
+      selector:
+        entity:
+          filter:
+            - domain: device_tracker
+
+    tesla_control_location:
+      name: Plats där lastbalansering ska vara aktiv
+      description: T.ex. "home".
+      default: home
+      selector:
+        select:
+          options:
+            - label: Home
+              value: home
+            - label: Not home
+              value: not_home
+            - label: Valfritt (ignorera plats)
+              value: "any"
+
+  source_url: https://community.home-assistant.io/
+
+variables:
+  v_phase1_entity: !input phase1_current_entity
+  v_phase2_entity: !input phase2_current_entity
+  v_phase3_entity: !input phase3_current_entity
+
+  v_total_power_entity: !input total_power_entity
+  v_power_limit_entity: !input power_limit_entity
+  v_power_limit_hyst: !input power_limit_hysteresis_kw
+
+  v_upper_amps: !input per_phase_upper_amps
+  v_lower_amps: !input per_phase_lower_amps
+
+  v_amps_entity: !input tesla_charging_amps_number_entity
+  v_min_amps: !input tesla_charging_amps_lower_value
+  v_max_amps: !input tesla_charging_amps_upper_value
+
+  tesla_control_location: !input tesla_control_location
+
+trigger:
+  - platform: time_pattern
+    seconds: !input polling_interval_seconds
+
+condition:
+  # Bilen måste ladda
+  - condition: state
+    entity_id: !input tesla_charging_state_entity
+    state: "on"
+
+  # Platsvillkor
+  - condition: or
+    conditions:
+      # Aktiv bara på specifik plats
+      - condition: and
+        conditions:
+          - condition: template
+            value_template: "{{ tesla_control_location != 'any' }}"
+          - condition: state
+            entity_id: !input tesla_device_tracker_entity
+            state: !input tesla_control_location
+      # Om "any" är valt, ignorera plats
+      - condition: template
+        value_template: "{{ tesla_control_location == 'any' }}"
+
+action:
+  - variables:
+      phase1_current: "{{ states(v_phase1_entity) | float(0) }}"
+      phase2_current: "{{ states(v_phase2_entity) | float(0) }}"
+      phase3_current: "{{ states(v_phase3_entity) | float(0) }}"
+      max_phase_current: >
+        {{ [phase1_current, phase2_current, phase3_current] | max }}
+
+      total_power_raw: "{{ states(v_total_power_entity) | float(0) }}"
+      # Antag: om värdet > 1000 så är det W, annars kW
+      total_power_kw: >
+        {% if total_power_raw > 1000 %}
+          {{ total_power_raw / 1000 }}
+        {% else %}
+          {{ total_power_raw }}
+        {% endif %}
+
+      power_limit_kw: "{{ states(v_power_limit_entity) | float(0) }}"
+
+      current_amps: "{{ states(v_amps_entity) | int(0) }}"
+
+  - choose:
+      # 1. ÖVERLAST: nån fas över övre gränsen ELLER total effekt över effekttaket
+      - conditions:
+          - condition: template
+            value_template: >
+              {{ max_phase_current > v_upper_amps
+                 or (power_limit_kw > 0 and total_power_kw > power_limit_kw) }}
+        sequence:
+          - service: number.set_value
+            target:
+              entity_id: !input tesla_charging_amps_number_entity
+            data:
+              value: >
+                {{ [current_amps - 1, v_min_amps] | max }}
+
+      # 2. Låg last på alla faser OCH under effekttak → höj laddströmmen
+      - conditions:
+          - condition: template
+            value_template: >
+              {{ max_phase_current < v_lower_amps
+                 and current_amps < v_max_amps
+                 and (
+                      power_limit_kw == 0
+                      or total_power_kw < (power_limit_kw - v_power_limit_hyst)
+                 )
+              }}
+        sequence:
+          - service: number.set_value
+            target:
+              entity_id: !input tesla_charging_amps_number_entity
+            data:
+              value: >
+                {{ [current_amps + 1, v_max_amps] | min }}
+
+mode: restart
