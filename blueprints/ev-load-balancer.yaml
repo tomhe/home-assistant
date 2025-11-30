@@ -1,5 +1,5 @@
 blueprint:
-  name: Tesla 3-fas lastbalansering (Tibber Pulse, A + effekttak)
+  name: Tesla 3-fas lastbalansering (Tibber Pulse, A + effekttak, rate-limit + cooldown)
   description: |
     Dynamisk lastbalansering för Tesla via Home Assistant.
     Justerar Teslans laddström upp/ned baserat på fasströmmar (A) från t.ex. Tibber Pulse
@@ -8,6 +8,11 @@ blueprint:
     Skydd:
     - Max A per fas
     - Max kW totalt (alla faser)
+
+    Rate-limit-optimering:
+    - Längre standardintervall (10 s)
+    - Större steg vid kraftig överlast (1–3 A per justering)
+    - Minsta tid mellan set-kommandon via input_datetime-helper (cooldown)
   domain: automation
 
   input:
@@ -88,7 +93,7 @@ blueprint:
     polling_interval_seconds:
       name: Pollintervall (sekunder)
       description: Hur ofta laddströmmen ska utvärderas/justeras.
-      default: "/5"
+      default: "/10"
       selector:
         select:
           options:
@@ -119,7 +124,7 @@ blueprint:
 
     tesla_charging_amps_upper_value:
       name: Max laddström (A)
-      description: Max tillåten laddström som automations får sätta.
+      description: Max tillåten laddström som automationen får sätta.
       default: 16
       selector:
         number:
@@ -161,6 +166,25 @@ blueprint:
             - label: Valfritt (ignorera plats)
               value: "any"
 
+    last_change_datetime_entity:
+      name: Senaste laddström-ändring (input_datetime)
+      description: input_datetime (med datum+tid) där automationen sparar tid för senaste ändring.
+      selector:
+        entity:
+          filter:
+            - domain: input_datetime
+
+    min_seconds_between_changes:
+      name: Minsta tid mellan ändringar (sekunder)
+      description: Cooldown mellan set-kommandon mot Tesla (rate-limit-skydd).
+      default: 20
+      selector:
+        number:
+          min: 0
+          max: 300
+          step: 5
+          mode: slider
+
   source_url: https://community.home-assistant.io/
 
 variables:
@@ -180,6 +204,9 @@ variables:
   v_max_amps: !input tesla_charging_amps_upper_value
 
   tesla_control_location: !input tesla_control_location
+
+  v_last_change_entity: !input last_change_datetime_entity
+  v_min_seconds_between_changes: !input min_seconds_between_changes
 
 trigger:
   - platform: time_pattern
@@ -227,22 +254,66 @@ action:
 
       current_amps: "{{ states(v_amps_entity) | int(0) }}"
 
+      last_change_state: "{{ states(v_last_change_entity) }}"
+      last_change_ts: >
+        {% set s = last_change_state %}
+        {% set t = as_timestamp(s, default=0) %}
+        {{ t }}
+      seconds_since_last_change: >
+        {% set ts = last_change_ts | float(0) %}
+        {% if ts == 0 %}
+          999999
+        {% else %}
+          {{ as_timestamp(now()) - ts }}
+        {% endif %}
+
   - choose:
-      # 1. ÖVERLAST: nån fas över övre gränsen ELLER total effekt över effekttaket
+      # 1. ÖVERLAST: någon fas över övre gränsen ELLER total effekt över effekttaket
       - conditions:
           - condition: template
             value_template: >
               {{ max_phase_current > v_upper_amps
                  or (power_limit_kw > 0 and total_power_kw > power_limit_kw) }}
+          - condition: template
+            value_template: >
+              {{ seconds_since_last_change >= v_min_seconds_between_changes }}
         sequence:
+          - variables:
+              phase_margin: "{{ max_phase_current - v_upper_amps }}"
+              power_margin: >
+                {% if power_limit_kw > 0 %}
+                  {{ total_power_kw - power_limit_kw }}
+                {% else %}
+                  0
+                {% endif %}
+              overload_margin: >
+                {{ [phase_margin, power_margin] | max }}
+
+              step_down: >
+                {% if overload_margin > 3 %}
+                  3
+                {% elif overload_margin > 1.5 %}
+                  2
+                {% else %}
+                  1
+                {% endif %}
+
+              new_amps_down: >
+                {{ [current_amps - step_down, v_min_amps] | max | int }}
+
           - service: number.set_value
             target:
               entity_id: !input tesla_charging_amps_number_entity
             data:
-              value: >
-                {{ [current_amps - 1, v_min_amps] | max }}
+              value: "{{ new_amps_down }}"
 
-      # 2. Låg last på alla faser OCH under effekttak → höj laddströmmen
+          - service: input_datetime.set_datetime
+            target:
+              entity_id: !input last_change_datetime_entity
+            data:
+              datetime: "{{ now().isoformat() }}"
+
+      # 2. Låg last på alla faser OCH under effekttak → höj laddströmmen (1 A-steg)
       - conditions:
           - condition: template
             value_template: >
@@ -253,12 +324,24 @@ action:
                       or total_power_kw < (power_limit_kw - v_power_limit_hyst)
                  )
               }}
+          - condition: template
+            value_template: >
+              {{ seconds_since_last_change >= v_min_seconds_between_changes }}
         sequence:
+          - variables:
+              new_amps_up: >
+                {{ [current_amps + 1, v_max_amps] | min | int }}
+
           - service: number.set_value
             target:
               entity_id: !input tesla_charging_amps_number_entity
             data:
-              value: >
-                {{ [current_amps + 1, v_max_amps] | min }}
+              value: "{{ new_amps_up }}"
+
+          - service: input_datetime.set_datetime
+            target:
+              entity_id: !input last_change_datetime_entity
+            data:
+              datetime: "{{ now().isoformat() }}"
 
 mode: restart
