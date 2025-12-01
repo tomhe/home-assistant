@@ -234,18 +234,6 @@ condition:
         value_template: "{{ tesla_control_location == 'any' }}"
 
 action:
-  # Steg 0: se till att laddströmmen aldrig börjar över 5 A
-  - choose:
-      - conditions:
-          - condition: template
-            value_template: >
-              {{ states(v_amps_entity) | float(0) > 5 }}
-        sequence:
-          - service: number.set_value
-            target:
-              entity_id: !input tesla_charging_amps_number_entity
-            data:
-              value: 5
   - variables:
       phase1_current: "{{ states(v_phase1_entity) | float(0) }}"
       phase2_current: "{{ states(v_phase2_entity) | float(0) }}"
