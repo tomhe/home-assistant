@@ -234,6 +234,12 @@ condition:
         value_template: "{{ tesla_control_location == 'any' }}"
 
 action:
+  - service: number.set_value
+    target:
+      entity_id: !input tesla_charging_amps_number_entity
+    data:
+      value: >
+        {{ [states(!input tesla_charging_amps_number_entity) | float(0), 5] | min }}
   - variables:
       phase1_current: "{{ states(v_phase1_entity) | float(0) }}"
       phase2_current: "{{ states(v_phase2_entity) | float(0) }}"
