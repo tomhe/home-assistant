@@ -330,11 +330,7 @@ action:
         sequence:
           - variables:
               new_amps_up: >
-                {% if max_phase_current < (v_lower_amps - 3) %}
-                  {{ [current_amps + 3, v_max_amps] | min | int }}
-                {% else %}
-                  {{ [current_amps + 1, v_max_amps] | min | int }}
-                {% endif %}
+                {{ [current_amps + 1, v_max_amps] | min | int }}
 
           - service: number.set_value
             target:
