@@ -6,13 +6,13 @@ blueprint:
     och ett effekttak (kW) för alla faser tillsammans.
 
     Skydd:
-    - Max A per fas
-    - Max kW totalt (alla faser)
+      - Max A per fas
+      - Max kW totalt (alla faser)
 
     Rate-limit-optimering:
-    - Längre standardintervall (10 s)
-    - Större steg vid kraftig överlast (1–3 A per justering)
-    - Minsta tid mellan set-kommandon via input_datetime-helper (cooldown)
+      - Längre standardintervall (t.ex. 10 s)
+      - Större steg vid kraftig överlast (1–3 A per justering)
+      - Minsta tid mellan set-kommandon via input_datetime-helper (cooldown)
   domain: automation
 
   input:
@@ -187,161 +187,166 @@ blueprint:
 
   source_url: https://community.home-assistant.io/
 
-variables:
-  v_phase1_entity: !input phase1_current_entity
-  v_phase2_entity: !input phase2_current_entity
-  v_phase3_entity: !input phase3_current_entity
+  variables:
+    v_phase1_entity: !input phase1_current_entity
+    v_phase2_entity: !input phase2_current_entity
+    v_phase3_entity: !input phase3_current_entity
+    v_total_power_entity: !input total_power_entity
+    v_power_limit_entity: !input power_limit_entity
+    v_power_limit_hyst: !input power_limit_hysteresis_kw
+    v_upper_amps: !input per_phase_upper_amps
+    v_lower_amps: !input per_phase_lower_amps
+    v_amps_entity: !input tesla_charging_amps_number_entity
+    v_min_amps: !input tesla_charging_amps_lower_value
+    v_max_amps: !input tesla_charging_amps_upper_value
+    tesla_control_location: !input tesla_control_location
+    v_last_change_entity: !input last_change_datetime_entity
+    v_min_seconds_between_changes: !input min_seconds_between_changes
 
-  v_total_power_entity: !input total_power_entity
-  v_power_limit_entity: !input power_limit_entity
-  v_power_limit_hyst: !input power_limit_hysteresis_kw
+  trigger:
+    - platform: time_pattern
+      seconds: !input polling_interval_seconds
 
-  v_upper_amps: !input per_phase_upper_amps
-  v_lower_amps: !input per_phase_lower_amps
+  condition:
+    # Bilen måste ladda
+    - condition: state
+      entity_id: !input tesla_charging_state_entity
+      state: "on"
 
-  v_amps_entity: !input tesla_charging_amps_number_entity
-  v_min_amps: !input tesla_charging_amps_lower_value
-  v_max_amps: !input tesla_charging_amps_upper_value
+    # Platsvillkor
+    - condition: or
+      conditions:
+        # Aktiv bara på specifik plats
+        - condition: and
+          conditions:
+            - condition: template
+              value_template: "{{ tesla_control_location != 'any' }}"
+            - condition: state
+              entity_id: !input tesla_device_tracker_entity
+              state: !input tesla_control_location
 
-  tesla_control_location: !input tesla_control_location
+        # Om "any" är valt, ignorera plats
+        - condition: template
+          value_template: "{{ tesla_control_location == 'any' }}"
 
-  v_last_change_entity: !input last_change_datetime_entity
-  v_min_seconds_between_changes: !input min_seconds_between_changes
+  action:
+    # NYTT: säkerställ att vi aldrig startar över 5 A
+    - choose:
+        - conditions:
+            - condition: template
+              value_template: >
+                {{ states(v_amps_entity) | float(0) > 5 }}
+          sequence:
+            - service: number.set_value
+              target:
+                entity_id: !input tesla_charging_amps_number_entity
+              data:
+                value: 5
 
-trigger:
-  - platform: time_pattern
-    seconds: !input polling_interval_seconds
+    # Därefter: befintlig logik
+    - variables:
+        phase1_current: "{{ states(v_phase1_entity) | float(0) }}"
+        phase2_current: "{{ states(v_phase2_entity) | float(0) }}"
+        phase3_current: "{{ states(v_phase3_entity) | float(0) }}"
+        max_phase_current: >
+          {{ [phase1_current, phase2_current, phase3_current] | max }}
 
-condition:
-  # Bilen måste ladda
-  - condition: state
-    entity_id: !input tesla_charging_state_entity
-    state: "on"
+        total_power_raw: "{{ states(v_total_power_entity) | float(0) }}"
+        # Antag: om värdet > 1000 så är det W, annars kW
+        total_power_kw: >
+          {% if total_power_raw > 1000 %}
+            {{ total_power_raw / 1000 }}
+          {% else %}
+            {{ total_power_raw }}
+          {% endif %}
 
-  # Platsvillkor
-  - condition: or
-    conditions:
-      # Aktiv bara på specifik plats
-      - condition: and
-        conditions:
-          - condition: template
-            value_template: "{{ tesla_control_location != 'any' }}"
-          - condition: state
-            entity_id: !input tesla_device_tracker_entity
-            state: !input tesla_control_location
-      # Om "any" är valt, ignorera plats
-      - condition: template
-        value_template: "{{ tesla_control_location == 'any' }}"
+        power_limit_kw: "{{ states(v_power_limit_entity) | float(0) }}"
+        current_amps: "{{ states(v_amps_entity) | int(0) }}"
 
-action:
-  - variables:
-      phase1_current: "{{ states(v_phase1_entity) | float(0) }}"
-      phase2_current: "{{ states(v_phase2_entity) | float(0) }}"
-      phase3_current: "{{ states(v_phase3_entity) | float(0) }}"
-      max_phase_current: >
-        {{ [phase1_current, phase2_current, phase3_current] | max }}
+        last_change_state: "{{ states(v_last_change_entity) }}"
+        last_change_ts: >
+          {% set s = last_change_state %}
+          {% set t = as_timestamp(s, default=0) %}
+          {{ t }}
 
-      total_power_raw: "{{ states(v_total_power_entity) | float(0) }}"
-      # Antag: om värdet > 1000 så är det W, annars kW
-      total_power_kw: >
-        {% if total_power_raw > 1000 %}
-          {{ total_power_raw / 1000 }}
-        {% else %}
-          {{ total_power_raw }}
-        {% endif %}
+        seconds_since_last_change: >
+          {% set ts = last_change_ts | float(0) %}
+          {% if ts == 0 %}
+            999999
+          {% else %}
+            {{ as_timestamp(now()) - ts }}
+          {% endif %}
 
-      power_limit_kw: "{{ states(v_power_limit_entity) | float(0) }}"
+    - choose:
+        # 1. ÖVERLAST: någon fas över övre gränsen ELLER total effekt över effekttaket
+        - conditions:
+            - condition: template
+              value_template: >
+                {{ max_phase_current > v_upper_amps
+                   or (power_limit_kw > 0 and total_power_kw > power_limit_kw) }}
+            - condition: template
+              value_template: >
+                {{ seconds_since_last_change >= v_min_seconds_between_changes }}
+          sequence:
+            - variables:
+                phase_margin: "{{ max_phase_current - v_upper_amps }}"
+                power_margin: >
+                  {% if power_limit_kw > 0 %}
+                    {{ total_power_kw - power_limit_kw }}
+                  {% else %}
+                    0
+                  {% endif %}
+                overload_margin: >
+                  {{ [phase_margin, power_margin] | max }}
 
-      current_amps: "{{ states(v_amps_entity) | int(0) }}"
+                step_down: >
+                  {% if overload_margin > 3 %}
+                    3
+                  {% elif overload_margin > 1.5 %}
+                    2
+                  {% else %}
+                    1
+                  {% endif %}
 
-      last_change_state: "{{ states(v_last_change_entity) }}"
-      last_change_ts: >
-        {% set s = last_change_state %}
-        {% set t = as_timestamp(s, default=0) %}
-        {{ t }}
-      seconds_since_last_change: >
-        {% set ts = last_change_ts | float(0) %}
-        {% if ts == 0 %}
-          999999
-        {% else %}
-          {{ as_timestamp(now()) - ts }}
-        {% endif %}
+                new_amps_down: >
+                  {{ [current_amps - step_down, v_min_amps] | max | int }}
+            - service: number.set_value
+              target:
+                entity_id: !input tesla_charging_amps_number_entity
+              data:
+                value: "{{ new_amps_down }}"
+            - service: input_datetime.set_datetime
+              target:
+                entity_id: !input last_change_datetime_entity
+              data:
+                datetime: "{{ now().isoformat() }}"
 
-  - choose:
-      # 1. ÖVERLAST: någon fas över övre gränsen ELLER total effekt över effekttaket
-      - conditions:
-          - condition: template
-            value_template: >
-              {{ max_phase_current > v_upper_amps
-                 or (power_limit_kw > 0 and total_power_kw > power_limit_kw) }}
-          - condition: template
-            value_template: >
-              {{ seconds_since_last_change >= v_min_seconds_between_changes }}
-        sequence:
-          - variables:
-              phase_margin: "{{ max_phase_current - v_upper_amps }}"
-              power_margin: >
-                {% if power_limit_kw > 0 %}
-                  {{ total_power_kw - power_limit_kw }}
-                {% else %}
-                  0
-                {% endif %}
-              overload_margin: >
-                {{ [phase_margin, power_margin] | max }}
+        # 2. Låg last på alla faser OCH under effekttak → höj laddströmmen (1 A-steg)
+        - conditions:
+            - condition: template
+              value_template: >
+                {{ max_phase_current < v_lower_amps
+                   and current_amps < v_max_amps
+                   and (
+                     power_limit_kw == 0
+                     or total_power_kw < (power_limit_kw - v_power_limit_hyst)
+                   ) }}
+            - condition: template
+              value_template: >
+                {{ seconds_since_last_change >= v_min_seconds_between_changes }}
+          sequence:
+            - variables:
+                new_amps_up: >
+                  {{ [current_amps + 1, v_max_amps] | min | int }}
+            - service: number.set_value
+              target:
+                entity_id: !input tesla_charging_amps_number_entity
+              data:
+                value: "{{ new_amps_up }}"
+            - service: input_datetime.set_datetime
+              target:
+                entity_id: !input last_change_datetime_entity
+              data:
+                datetime: "{{ now().isoformat() }}"
 
-              step_down: >
-                {% if overload_margin > 3 %}
-                  3
-                {% elif overload_margin > 1.5 %}
-                  2
-                {% else %}
-                  1
-                {% endif %}
-
-              new_amps_down: >
-                {{ [current_amps - step_down, v_min_amps] | max | int }}
-
-          - service: number.set_value
-            target:
-              entity_id: !input tesla_charging_amps_number_entity
-            data:
-              value: "{{ new_amps_down }}"
-
-          - service: input_datetime.set_datetime
-            target:
-              entity_id: !input last_change_datetime_entity
-            data:
-              datetime: "{{ now().isoformat() }}"
-
-      # 2. Låg last på alla faser OCH under effekttak → höj laddströmmen (1 A-steg)
-      - conditions:
-          - condition: template
-            value_template: >
-              {{ max_phase_current < v_lower_amps
-                 and current_amps < v_max_amps
-                 and (
-                      power_limit_kw == 0
-                      or total_power_kw < (power_limit_kw - v_power_limit_hyst)
-                 )
-              }}
-          - condition: template
-            value_template: >
-              {{ seconds_since_last_change >= v_min_seconds_between_changes }}
-        sequence:
-          - variables:
-              new_amps_up: >
-                {{ [current_amps + 1, v_max_amps] | min | int }}
-
-          - service: number.set_value
-            target:
-              entity_id: !input tesla_charging_amps_number_entity
-            data:
-              value: "{{ new_amps_up }}"
-
-          - service: input_datetime.set_datetime
-            target:
-              entity_id: !input last_change_datetime_entity
-            data:
-              datetime: "{{ now().isoformat() }}"
-
-mode: restart
+  mode: restart
